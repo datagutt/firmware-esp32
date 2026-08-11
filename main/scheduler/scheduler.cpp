@@ -149,9 +149,6 @@ struct Context {
   PrefetchResult prefetch;
   TaskHandle_t fetch_task = nullptr;
 
-  // Default brightness
-  uint8_t brightness_pct = (CONFIG_HUB75_BRIGHTNESS * 100) / 255;
-
   // Synchronization
   SemaphoreHandle_t mutex = nullptr;
 };
@@ -226,11 +223,14 @@ void http_fetch_task(void* param) {
 
   // Phase 1 — read inputs we need under the lock.
   char* http_url_copy = nullptr;
-  uint8_t brightness_pct = 0;
+  // Seed from the level the panel is actually at, not ctx: remote_get() only
+  // overwrites this when the response carries a valid Tronbyt-Brightness, so a
+  // server that omits the header leaves a brightness set from the API, console
+  // or touch in place instead of reverting it to the last server-supplied one.
+  uint8_t brightness_pct = display_get_brightness();
   {
     raii::MutexGuard lock(ctx.mutex);
     if (lock) {
-      brightness_pct = ctx.brightness_pct;
       if (ctx.http_url) http_url_copy = strdup(ctx.http_url);
     }
   }
@@ -421,7 +421,6 @@ void http_apply_prefetch() {
   // image and just re-arm the poll timer with the returned dwell.
   if (ctx.prefetch.status_code == 304) {
     display_set_brightness(ctx.prefetch.brightness_pct);
-    ctx.brightness_pct = ctx.prefetch.brightness_pct;
     int32_t dwell = ctx.prefetch.dwell_secs;
     if (dwell <= 0) dwell = DEFAULT_REFRESH_INTERVAL;
     dwell = effective_dwell_for_brightness(ctx.prefetch.brightness_pct, dwell);
@@ -438,7 +437,6 @@ void http_apply_prefetch() {
   if (ctx.prefetch.webp == nullptr || ctx.prefetch.len == 0) {
     ESP_LOGW(TAG, "HTTP fetch returned empty content; keeping current frame");
     display_set_brightness(ctx.prefetch.brightness_pct);
-    ctx.brightness_pct = ctx.prefetch.brightness_pct;
     int32_t dwell = ctx.prefetch.dwell_secs;
     if (dwell <= 0) dwell = DEFAULT_REFRESH_INTERVAL;
     dwell = effective_dwell_for_brightness(ctx.prefetch.brightness_pct, dwell);
@@ -450,7 +448,6 @@ void http_apply_prefetch() {
 
   // Apply brightness and queue image
   display_set_brightness(ctx.prefetch.brightness_pct);
-  ctx.brightness_pct = ctx.prefetch.brightness_pct;
 
   int32_t dwell = ctx.prefetch.dwell_secs;
   if (dwell <= 0) {

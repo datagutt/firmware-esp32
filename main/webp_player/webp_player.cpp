@@ -40,8 +40,9 @@ int32_t effective_dwell_for_brightness(uint8_t brightness_pct,
   if (cap < 5) {
     cap = 5;
   }
-  // remote_get may leave brightness unset (-1), seen as 255 when written to u8
-  if (brightness_pct > 100) {
+  // Defensive: remote_get() no longer reports out-of-range levels, but an
+  // out-of-range value here means "unknown", not "very bright".
+  if (brightness_pct > DISPLAY_MAX_BRIGHTNESS) {
     return dwell_secs;
   }
   if (brightness_pct == 0 && dwell_secs > cap) {

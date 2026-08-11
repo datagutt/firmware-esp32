@@ -520,11 +520,16 @@ uint8_t display_get_brightness() { return _brightness; }
 #endif
 
 static inline uint8_t brightness_percent_to_8bit(uint8_t pct) {
-  if (pct > 100) pct = 100;
+  if (pct > DISPLAY_MAX_BRIGHTNESS) pct = DISPLAY_MAX_BRIGHTNESS;
   return (uint8_t)(((uint32_t)pct * BRIGHTNESS_8BIT_MAX + 50) / 100);
 }
 
 void display_set_brightness(uint8_t brightness_pct) {
+  if (brightness_pct > DISPLAY_MAX_BRIGHTNESS) {
+    ESP_LOGW(TAG, "Ignoring invalid brightness %u (valid range %d-%d)",
+             brightness_pct, DISPLAY_MIN_BRIGHTNESS, DISPLAY_MAX_BRIGHTNESS);
+    return;
+  }
   if (_matrix == NULL) return;
   if (brightness_pct != _brightness) {
     uint8_t brightness_8bit = brightness_percent_to_8bit(brightness_pct);

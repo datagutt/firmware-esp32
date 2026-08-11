@@ -14,6 +14,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include "display.h"
 #include "http_slot.h"
 #include "nvs_settings.h"
 #include "ota.h"
@@ -43,6 +44,11 @@ bool http_status_is_transient(int status) {
 constexpr size_t ETAG_MAX = 80;
 constexpr size_t ETAG_URL_MAX = 256;
 
+// Sentinel for "the response carried no usable Tronbyt-Brightness header", so
+// the caller's current level is left alone instead of being overwritten. Must
+// stay outside the valid 0-100 range.
+constexpr int16_t BRIGHTNESS_UNSET = -1;
+
 // Single-slot ETag cache for conditional GETs. remote_get has one caller
 // (the scheduler fetch task), so plain statics need no locking. The cached
 // validator only applies while the poll URL stays the same.
@@ -55,7 +61,7 @@ struct RemoteState {
   size_t size;
   size_t max;
   size_t expected_len;
-  uint8_t brightness;
+  int16_t brightness;
   int32_t dwell_secs;
   char* ota_url;
   char* image_url;
@@ -147,10 +153,14 @@ esp_err_t http_callback(esp_http_client_event_t* event) {
       }
 
       if (strcasecmp(event->header_key, "Tronbyt-Brightness") == 0) {
-        state->brightness =
-            static_cast<uint8_t>(atoi(event->header_value));
-        ESP_LOGD(TAG, "Tronbyt-Brightness value: %d%%",
-                 state->brightness);
+        int value = atoi(event->header_value);
+        if (value >= DISPLAY_MIN_BRIGHTNESS && value <= DISPLAY_MAX_BRIGHTNESS) {
+          state->brightness = static_cast<int16_t>(value);
+          ESP_LOGD(TAG, "Tronbyt-Brightness value: %d%%", value);
+        } else {
+          ESP_LOGW(TAG, "Ignoring invalid Tronbyt-Brightness: %s",
+                   event->header_value);
+        }
       } else if (strcasecmp(event->header_key, "Tronbyt-Dwell-Secs") ==
                  0) {
         state->dwell_secs = atoi(event->header_value);
@@ -280,7 +290,7 @@ int remote_get(const char* url, uint8_t** buf, size_t* len,
       .size = CONFIG_HTTP_BUFFER_SIZE_DEFAULT,
       .max = CONFIG_HTTP_BUFFER_SIZE_MAX,
       .expected_len = 0,
-      .brightness = 255,
+      .brightness = BRIGHTNESS_UNSET,
       .dwell_secs = -1,
       .ota_url = nullptr,
       .image_url = nullptr,
@@ -327,7 +337,7 @@ int remote_get(const char* url, uint8_t** buf, size_t* len,
       if (state.ota_url) { free(state.ota_url); state.ota_url = nullptr; }
       if (state.image_url) { free(state.image_url); state.image_url = nullptr; }
       state.reboot_requested = false;
-      state.brightness  = 255;
+      state.brightness  = BRIGHTNESS_UNSET;
       state.dwell_secs  = -1;
       state.quiet       = false;
       state.etag[0]     = '\0';
@@ -427,7 +437,9 @@ int remote_get(const char* url, uint8_t** buf, size_t* len,
       }
       *buf           = static_cast<uint8_t*>(state.buf);
       *len           = state.len;
-      *brightness_pct = state.brightness;
+      if (state.brightness != BRIGHTNESS_UNSET) {
+        *brightness_pct = static_cast<uint8_t>(state.brightness);
+      }
       if (state.dwell_secs > -1 && state.dwell_secs < 300)
         *dwell_secs = state.dwell_secs;
       *ota_url = state.ota_url;
@@ -441,7 +453,9 @@ int remote_get(const char* url, uint8_t** buf, size_t* len,
       quiet_hours_set_remote_active(state.quiet);
       *buf            = nullptr;
       *len            = 0;
-      *brightness_pct = state.brightness;
+      if (state.brightness != BRIGHTNESS_UNSET) {
+        *brightness_pct = static_cast<uint8_t>(state.brightness);
+      }
       if (state.dwell_secs > -1 && state.dwell_secs < 300)
         *dwell_secs = state.dwell_secs;
       *ota_url = state.ota_url;
