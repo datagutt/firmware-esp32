@@ -150,6 +150,16 @@ extern "C" void app_main(void) {
   esp_register_shutdown_handler(&display_shutdown);
 
 #ifdef CONFIG_BOARD_TIDBYT_GEN2
+  // Seed the touch state from the brightness display_initialize() just restored
+  // so a device switched off by touch stays off across a reboot, and the first
+  // HOLD after a reboot toggles the way the panel looks rather than the other
+  // way. Brightness 0 keeps the 30% default as the level to come back to.
+  {
+    uint8_t restored = display_get_brightness();
+    display_power_on = restored > 0;
+    if (restored > 0) saved_brightness = restored;
+  }
+
   // Initialize touch controls (GPIO33 on Tidbyt Gen2). Skipping init entirely
   // when disabled also means the touch_poll task is never spawned, so there is
   // no polling overhead.

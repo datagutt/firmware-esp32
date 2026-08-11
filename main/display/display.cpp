@@ -25,6 +25,65 @@ static bool IRAM_ATTR frame_sync_isr(void *arg) {
 static uint8_t _brightness = (CONFIG_HUB75_BRIGHTNESS * 100) / 255;
 static const char *TAG = "display";
 
+// Per-board ceiling for the 0-100% -> set_brightness() (0-255) mapping.
+// Genuine Tidbyt hardware (Gen1/Gen2) uses 100, matching the stock HDK
+// convention where the brightness percentage feeds the panel 1:1 (max ~39%
+// panel PWM duty). Third-party panels with no Tidbyt reference fall back to the
+// legacy 230 (~90% duty) and can be tuned empirically per board.
+#if CONFIG_BOARD_TIDBYT_GEN1 || CONFIG_BOARD_TIDBYT_GEN2
+#define BRIGHTNESS_8BIT_MAX 100
+#endif
+#ifndef BRIGHTNESS_8BIT_MAX
+#define BRIGHTNESS_8BIT_MAX 230
+#endif
+
+static inline uint8_t brightness_percent_to_8bit(uint8_t pct) {
+  if (pct > DISPLAY_MAX_BRIGHTNESS) pct = DISPLAY_MAX_BRIGHTNESS;
+  return (uint8_t)(((uint32_t)pct * BRIGHTNESS_8BIT_MAX + 50) / 100);
+}
+
+// ---- Brightness persistence ----
+//
+// The level survives a reboot so a device dimmed for the night — or switched
+// off by touch — comes back where it was instead of flashing the boot animation
+// at the compiled default until the first fetch lands.
+//
+// Deliberately kept out of the main config blob: that one is saved as a whole
+// struct through a two-slot atomic write, which is far too heavy for a value
+// the scheduler re-applies on every image. A standalone u8 key costs one small
+// NVS entry per actual change.
+static const char *PREF_NVS_NAMESPACE = "disp_pref";
+static const char *PREF_KEY_BRIGHTNESS = "brightness";
+
+// Returns the stored brightness, or the compiled default when nothing valid is
+// stored. nvs_settings_init() has already mounted NVS by the time this runs.
+static uint8_t brightness_load(void) {
+  uint8_t pct = (CONFIG_HUB75_BRIGHTNESS * 100) / 255;
+  NvsHandle nvs(PREF_NVS_NAMESPACE, NVS_READONLY);
+  if (!nvs) return pct;
+
+  uint8_t stored = 0;
+  if (nvs.get_u8(PREF_KEY_BRIGHTNESS, &stored) == ESP_OK &&
+      stored <= DISPLAY_MAX_BRIGHTNESS) {
+    pct = stored;
+  }
+  return pct;
+}
+
+// Best-effort: a failed write only costs the level on the next boot, so it is
+// logged rather than propagated to the caller.
+static void brightness_save(uint8_t pct) {
+  NvsHandle nvs(PREF_NVS_NAMESPACE, NVS_READWRITE);
+  if (!nvs) {
+    ESP_LOGW(TAG, "Failed to open %s namespace", PREF_NVS_NAMESPACE);
+    return;
+  }
+  if (nvs.set_u8(PREF_KEY_BRIGHTNESS, pct) != ESP_OK ||
+      nvs.commit() != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to persist brightness");
+  }
+}
+
 #if CONFIG_HUB75_PANEL_WIDTH == 128 && CONFIG_HUB75_PANEL_HEIGHT == 64
 // Batched upscale buffer: 4 source rows → 8 output rows per draw_pixels call.
 // 4 KB in BSS (internal SRAM) replaces a 32 KB PSRAM heap allocation while
@@ -500,29 +559,16 @@ int display_initialize(void) {
   _matrix->set_frame_callback(frame_sync_isr, _frame_sync_sem);
 #endif
 
-  display_set_brightness((CONFIG_HUB75_BRIGHTNESS * 100) / 255);
+  // Applied directly rather than through display_set_brightness(), which would
+  // write the value straight back to NVS on every boot.
+  _brightness = brightness_load();
+  _matrix->set_brightness(brightness_percent_to_8bit(_brightness));
+  ESP_LOGI(TAG, "Restored brightness to %u%%", _brightness);
 
   return 0;
 }
 
 uint8_t display_get_brightness() { return _brightness; }
-
-// Per-board ceiling for the 0-100% -> set_brightness() (0-255) mapping.
-// Genuine Tidbyt hardware (Gen1/Gen2) uses 100, matching the stock HDK
-// convention where the brightness percentage feeds the panel 1:1 (max ~39%
-// panel PWM duty). Third-party panels with no Tidbyt reference fall back to the
-// legacy 230 (~90% duty) and can be tuned empirically per board.
-#if CONFIG_BOARD_TIDBYT_GEN1 || CONFIG_BOARD_TIDBYT_GEN2
-#define BRIGHTNESS_8BIT_MAX 100
-#endif
-#ifndef BRIGHTNESS_8BIT_MAX
-#define BRIGHTNESS_8BIT_MAX 230
-#endif
-
-static inline uint8_t brightness_percent_to_8bit(uint8_t pct) {
-  if (pct > DISPLAY_MAX_BRIGHTNESS) pct = DISPLAY_MAX_BRIGHTNESS;
-  return (uint8_t)(((uint32_t)pct * BRIGHTNESS_8BIT_MAX + 50) / 100);
-}
 
 void display_set_brightness(uint8_t brightness_pct) {
   if (brightness_pct > DISPLAY_MAX_BRIGHTNESS) {
@@ -539,6 +585,7 @@ void display_set_brightness(uint8_t brightness_pct) {
     _matrix->set_brightness(brightness_8bit);
     _matrix->clear();
     _brightness = brightness_pct;
+    brightness_save(brightness_pct);
   }
 }
 
